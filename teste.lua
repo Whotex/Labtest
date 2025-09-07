@@ -1,4 +1,6 @@
--- Mayunie DEX Explorer - V4 (Delta 720x1280 friendly: menor altura + props OK)
+-- Mayunie DEX Explorer - V5 (Delta 720x1280) 
+-- Igual à V4 (janela menor, centralizada, árvore auto-height, props OK),
+-- com persistência de expansão dos nós em atualizações/refresco.
 -- Tecla: RightCtrl alterna visibilidade
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -25,6 +27,11 @@ local function getFullPath(inst)
     local seg,cur={},inst
     while cur and cur~=game do table.insert(seg,1,("%s[%s]"):format(cur.Name,cur.ClassName)); cur=cur.Parent end
     return "game."..table.concat(seg,".")
+end
+local function keyFor(inst)
+    local ok, p = pcall(function() return inst:GetFullName() end)
+    if ok and p and p~="" then return p end
+    return getFullPath(inst)
 end
 local function serialize(v)
     local t=typeofRbx(v)
@@ -70,17 +77,14 @@ local COMMON_PROPS = {
     ["Lighting"]={"Ambient","Brightness","ClockTime","FogColor","FogEnd","FogStart","OutdoorAmbient","GlobalShadows","Technology"},
     ["SoundService"]={"Volume","DopplerScale","RolloffScale"},
     ["StarterGui"]={"ResetPlayerGuiOnSpawn","ShowDevelopmentGui"},
-    -- BasePart / Parts
     ["Workspace/BasePart"]={"Name","Transparency","Reflectance","Material","Color","Size","CFrame","Anchored","CanCollide","CanQuery","CanTouch","CastShadow"},
     ["Part"]={"Name","Transparency","Material","Color","Size","CFrame","Anchored","CanCollide"},
     ["MeshPart"]={"Name","Transparency","Material","Color","Size","CFrame","Anchored","MeshId","TextureID","CanCollide"},
     ["UnionOperation"]={"Name","Transparency","Material","Color","Size","CFrame","Anchored","CanCollide"},
     ["TrussPart"]={"Name","Transparency","Color","Size","CFrame","Anchored","CanCollide"},
-    -- Models / Humanoids
     ["Workspace/Model"]={"Name","PrimaryPart"},
     ["Model"]={"Name","PrimaryPart"},
     ["Humanoid"]={"Health","MaxHealth","WalkSpeed","JumpPower","AutoRotate"},
-    -- GuiObject
     ["GuiObject"]={"Name","Visible","Active","ZIndex","AnchorPoint","Position","Size","BackgroundColor3","BackgroundTransparency","BorderSizePixel"},
     ["Frame"]={"BackgroundColor3","BackgroundTransparency","BorderSizePixel","Visible","Size","Position"},
     ["TextLabel"]={"Text","TextSize","TextColor3","TextTransparency","TextWrapped","RichText","Visible","Size","Position","BackgroundTransparency"},
@@ -91,7 +95,6 @@ local COMMON_PROPS = {
     ["ScrollingFrame"]={"CanvasSize","AutomaticCanvasSize","ScrollBarThickness","ScrollingDirection","Visible","Size","Position"},
     ["BillboardGui"]={"Adornee","Size","StudsOffset","Enabled"},
     ["SurfaceGui"]={"Adornee","Face","LightInfluence","Enabled"},
-    -- Effects / Others
     ["Sound"]={"SoundId","Volume","PlaybackSpeed","TimePosition","Playing","Looped"},
     ["Camera"]={"CFrame","FieldOfView"},
     ["PointLight"]={"Enabled","Brightness","Range","Color"},
@@ -111,7 +114,6 @@ local function fallbackProps(inst)
     else return COMMON_PROPS["Instance"] end
 end
 
--- Executor extra
 local getproperties_fn = rawget(getfenv(),"getproperties") or rawget(getfenv(),"getprops")
 
 -- ==== Tema ====
@@ -128,8 +130,7 @@ pcall(protect_gui, ScreenGui); ScreenGui.Parent=GUI_PARENT
 
 local function calcWindow()
     local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(720,1280)
-    local W = 640; local H = 460 -- <<< altura reduzida
-    -- garante bordas
+    local W = 640; local H = 460
     W = math.min(W, math.max(480, vp.X - 24))
     H = math.min(H, math.max(380, vp.Y - 80))
     return W,H,vp
@@ -223,7 +224,7 @@ Status.TextXAlignment=Enum.TextXAlignment.Left; Status.Text=""; Status.Size=UDim
 local function setStatus(t) Status.Text=t or "" end
 local function clearChildren(gui) for _,c in ipairs(gui:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end end
 
--- ==== Painel de propriedades (com fallback robusto) ====
+-- ==== Painel de propriedades ====
 local editEnabled=false
 local function rowProperty(name, value, inst, allowEdit)
     local Row = Instance.new("Frame"); Row.BackgroundColor3=Theme.bg; Row.Size=UDim2.new(1,0,0,30)
@@ -253,11 +254,9 @@ local function buildPropertyPanel(inst, allowEdit)
     if not inst then return end
     PropHeader.Text=("Propriedades — %s (%s)"):format(inst.Name, inst.ClassName)
 
-    -- 1) Sempre mostra nome/classe
     rowProperty("Name",inst.Name,inst,allowEdit).Parent=PropScroll
     rowProperty("ClassName",inst.ClassName,inst,false).Parent=PropScroll
 
-    -- 2) Tenta via getproperties (se existir no executor)
     local listed={}
     local function addProp(p)
         if listed[p] then return end
@@ -266,15 +265,10 @@ local function buildPropertyPanel(inst, allowEdit)
     end
     if getproperties_fn then
         local ok, list = pcall(function() return getproperties_fn(inst) end)
-        if ok and type(list)=="table" then
-            for _,p in ipairs(list) do addProp(p) end
-        end
+        if ok and type(list)=="table" then for _,p in ipairs(list) do addProp(p) end end
     end
-
-    -- 3) Fallback por classe (garante props úteis mesmo sem getproperties)
     for _,p in ipairs(fallbackProps(inst)) do addProp(p) end
 
-    -- 4) Atributos
     local attrs={} pcall(function() attrs=inst:GetAttributes() end)
     if attrs and next(attrs)~=nil then
         local sep=Instance.new("TextLabel"); sep.BackgroundTransparency=1; sep.Text="Atributos"; sep.Font=Enum.Font.GothamSemibold; sep.TextSize=14; sep.TextColor3=Theme.subtext; sep.TextXAlignment=Enum.TextXAlignment.Left
@@ -291,6 +285,9 @@ local function buildPropertyPanel(inst, allowEdit)
         end
     end
 end
+
+-- ==== Persistência de expansão ====
+local ExpandState = {}  -- [keyFor(instance)] = true/false
 
 -- ==== Árvore (cada item empurra e rola) ====
 local Selected, SelectionBox
@@ -323,19 +320,32 @@ local function makeTreeRow(inst, depth)
     ChildrenContainer.Parent=Row
     local ChildLayout=Instance.new("UIListLayout", ChildrenContainer); ChildLayout.SortOrder=Enum.SortOrder.LayoutOrder; ChildLayout.Padding=UDim.new(0,2)
 
-    local expanded=false
+    local KEY = keyFor(inst)
+    local expanded = ExpandState[KEY] == true
+
     local function refreshChildren()
         clearChildren(ChildrenContainer)
         local kids={} pcall(function() kids=inst:GetChildren() end)
         table.sort(kids,function(a,b) return a.Name:lower()<b.Name:lower() end)
-        for _,child in ipairs(kids) do makeTreeRow(child, depth+1).Parent=ChildrenContainer end
+        for _,child in ipairs(kids) do
+            local sub = makeTreeRow(child, depth+1)
+            sub.Parent = ChildrenContainer
+        end
+        S.RunService.Heartbeat:Wait()
+        TreeScroll.CanvasSize=UDim2.new(0,0,0,TreeLayout.AbsoluteContentSize.Y+10)
+    end
+
+    -- Inicializa visual conforme estado persistido
+    if expanded then
+        Toggle.Text = "▼"
+        refreshChildren()
     end
 
     Toggle.MouseButton1Click:Connect(function()
-        expanded=not expanded; Toggle.Text=expanded and "▼" or "▶"
+        expanded = not expanded
+        ExpandState[KEY] = expanded
+        Toggle.Text = expanded and "▼" or "▶"
         if expanded then refreshChildren() else clearChildren(ChildrenContainer) end
-        S.RunService.Heartbeat:Wait()
-        TreeScroll.CanvasSize=UDim2.new(0,0,0,TreeLayout.AbsoluteContentSize.Y+10)
     end)
 
     NameBtn.MouseButton1Click:Connect(function()
@@ -347,8 +357,13 @@ local function makeTreeRow(inst, depth)
         end
     end)
 
-    inst.ChildAdded:Connect(function() if expanded then refreshChildren() end end)
-    inst.ChildRemoved:Connect(function() if expanded then refreshChildren() end end)
+    -- Ao mudar filhos, mantém expansão conforme ExpandState
+    inst.ChildAdded:Connect(function()
+        if ExpandState[KEY] then refreshChildren() end
+    end)
+    inst.ChildRemoved:Connect(function()
+        if ExpandState[KEY] then refreshChildren() end
+    end)
 
     return Row
 end
@@ -360,7 +375,10 @@ local ROOTS = {
 }
 local function buildTree()
     clearChildren(TreeScroll)
-    for _,root in ipairs(ROOTS) do makeTreeRow(root,0).Parent=TreeScroll end
+    for _,root in ipairs(ROOTS) do
+        local row = makeTreeRow(root,0)
+        row.Parent=TreeScroll
+    end
 end
 
 -- ==== Busca ====
@@ -407,7 +425,11 @@ BtnEdit.MouseButton1Click:Connect(function()
     if Selected then buildPropertyPanel(Selected, editEnabled) end
     setStatus(editEnabled and "Edição habilitada" or "Edição desabilitada")
 end)
-BtnRefresh.MouseButton1Click:Connect(function() buildTree(); setStatus("Árvore atualizada") end)
+BtnRefresh.MouseButton1Click:Connect(function()
+    -- Reconstroi a árvore SEM perder ExpandState
+    buildTree()
+    setStatus("Árvore atualizada (estado de expansão preservado)")
+end)
 BtnCopy.MouseButton1Click:Connect(function()
     if not Selected then setStatus("Nada selecionado"); return end
     local p = getFullPath(Selected)
