@@ -1,376 +1,902 @@
--- Teleport GUI – Delta friendly with diagnostics
-local Players             = game:GetService("Players")
-local TeleportService     = game:GetService("TeleportService")
-local TweenService        = game:GetService("TweenService")
-local UserInputService    = game:GetService("UserInputService")
-local StarterGui          = game:GetService("StarterGui")
-local LocalizationService = game:GetService("LocalizationService")
-local HttpService         = game:GetService("HttpService")
+--[[
+  Mayunie DEX Explorer (standalone)
+  Autor: ChatGPT (para Bruno)
+  Objetivo: Explorer estilo Dex, seguro e compatível, com GUI moderna e Property Inspector.
 
-local LP = Players.LocalPlayer
-local PG = LP:WaitForChild("PlayerGui")
+  Atalhos:
+  - RightCtrl: mostrar/ocultar a janela
+  - Botão Refresh: recarrega a árvore
+  - Clique no triângulo ▶ para expandir/colapsar
+  - Clique no nome do item para selecionar
+  - "Copy Path" copia o caminho do objeto
+  Observação: edição de propriedades depende do nível de permissão do executor e da classe. Propriedades protegidas serão ignoradas com segurança.
+]]--
 
-local function log(msg)
-    pcall(function() if rconsoleprint then rconsoleprint("[TP-GUI] "..tostring(msg).."\n") end end)
-    print("[TP-GUI] "..tostring(msg))
-end
-local function notify(title, text)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = 5})
+-- ==============================
+--  Utilidades e compat wrappers
+-- ==============================
+local Services = setmetatable({}, {
+    __index = function(t, k)
+        local s = game:GetService(k)
+        rawset(t, k, s)
+        return s
+    end
+})
+
+-- Evita GUI duplicada
+pcall(function()
+    local old = Services.CoreGui:FindFirstChild("MayunieDexExplorer")
+    if old then old:Destroy() end
+end)
+
+local protect_gui = rawget(getfenv(), "syn") and syn.protect_gui or (protectgui or function() end)
+local gethui_ok, hiddenui = pcall(function() return gethui and gethui() end)
+local GUI_PARENT = (gethui_ok and hiddenui) or Services.CoreGui
+
+local function safeSetClipboard(text)
+    local ok = pcall(function()
+        if setclipboard then
+            setclipboard(text)
+        else
+            error("setclipboard indisponível")
+        end
     end)
+    return ok
 end
 
--- i18n simples
-local lang = (tostring(LocalizationService.RobloxLocaleId or "en"):sub(1,2) == "pt") and "pt" or "en"
-local TX = (lang == "pt") and {
-    title="Teleport GUI",
-    place="PlaceId",
-    job="JobId",
-    paste="Colar",
-    tp="Teleportar",
-    tpsimple="Testar Teleport simples",
-    status="Status",
-    ok="Pronto",
-    badGuid="JobId inválido",
-    noPlace="PlaceId inválido",
-    tpStart="Teleportando...",
-    tpDone="Teleport solicitado",
-    used="JobId já salvo",
-    history="Salvar JobIds usados",
-    toggle="RightShift mostra/oculta",
-    noclip="Clipboard indisponível; cole manualmente",
-    useCurrent="Usar PlaceId atual",
-} or {
-    title="Teleport GUI",
-    place="PlaceId",
-    job="JobId",
-    paste="Paste",
-    tp="Teleport",
-    tpsimple="Test simple Teleport",
-    status="Status",
-    ok="Ready",
-    badGuid="Invalid JobId",
-    noPlace="Invalid PlaceId",
-    tpStart="Teleporting...",
-    tpDone="Teleport requested",
-    used="JobId already saved",
-    history="Save used JobIds",
-    toggle="RightShift toggles",
-    noclip="Clipboard not available; paste manually",
-    useCurrent="Use current PlaceId",
+local function typeofRbx(v)
+    local ok, t = pcall(function() return typeof(v) end)
+    if ok then return t end
+    -- fallback
+    local mt = getmetatable(v)
+    return mt and mt.__type or type(v)
+end
+
+local function serialize(v)
+    local t = typeofRbx(v)
+    if t == "Instance" then
+        return string.format("%s (%s)", v.Name, v.ClassName)
+    elseif t == "Vector3" then
+        return string.format("%g, %g, %g", v.X, v.Y, v.Z)
+    elseif t == "Vector2" then
+        return string.format("%g, %g", v.X, v.Y)
+    elseif t == "UDim2" then
+        return string.format("{%g, %g}; {%g, %g}", v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset)
+    elseif t == "UDim" then
+        return string.format("%g, %g", v.Scale, v.Offset)
+    elseif t == "Color3" then
+        return string.format("%g, %g, %g", v.R, v.G, v.B)
+    elseif t == "CFrame" then
+        local cf = v:GetComponents()
+        return table.concat(cf, ", ")
+    elseif t == "BrickColor" then
+        return v.Name
+    elseif t == "EnumItem" then
+        return v.Name
+    elseif t == "string" then
+        return v
+    elseif t == "boolean" then
+        return v and "true" or "false"
+    elseif t == "number" then
+        return tostring(v)
+    elseif t == "table" then
+        return "[table]"
+    else
+        return tostring(v)
+    end
+end
+
+-- Parses básicos para edição textual
+local function parseVector3(str)
+    local x,y,z = str:match("^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*$")
+    if x and y and z then
+        return Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+    end
+end
+local function parseVector2(str)
+    local x,y = str:match("^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*$")
+    if x and y then
+        return Vector2.new(tonumber(x), tonumber(y))
+    end
+end
+local function parseUDim2(str)
+    -- Formato: "{sx, ox}; {sy, oy}"
+    local sx,ox,sy,oy = str:match("^%s*{%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*}%s*;%s*{%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*}%s*$")
+    if sx and ox and sy and oy then
+        return UDim2.new(tonumber(sx), tonumber(ox), tonumber(sy), tonumber(oy))
+    end
+end
+local function parseUDim(str)
+    local s,o = str:match("^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*$")
+    if s and o then return UDim.new(tonumber(s), tonumber(o)) end
+end
+local function parseColor3(str)
+    local r,g,b = str:match("^%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*,%s*([%-%d%.]+)%s*$")
+    if r and g and b then return Color3.new(tonumber(r), tonumber(g), tonumber(b)) end
+end
+local function parseBool(str)
+    str = str:lower()
+    if str == "true" or str == "1" or str == "on" or str == "yes" then return true end
+    if str == "false" or str == "0" or str == "off" or str == "no" then return false end
+end
+
+-- Tenta descobrir a propriedade com base no tipo de destino
+local function smartParse(targetValue, text)
+    local t = typeofRbx(targetValue)
+    if t == "Vector3" then return parseVector3(text)
+    elseif t == "Vector2" then return parseVector2(text)
+    elseif t == "UDim2" then return parseUDim2(text)
+    elseif t == "UDim" then return parseUDim(text)
+    elseif t == "Color3" then return parseColor3(text)
+    elseif t == "boolean" then return parseBool(text)
+    elseif t == "number" then
+        local n = tonumber(text)
+        return n
+    elseif t == "string" then
+        return text
+    elseif t == "EnumItem" then
+        -- permite setar por nome curto, se corresponder
+        local enumType = tostring(targetValue.EnumType) -- "Enum.Material"
+        local enumFamily = Enum[enumType:match("Enum%.(.+)$") or ""]
+        if enumFamily then
+            local found
+            for _,item in ipairs(enumFamily:GetEnumItems()) do
+                if item.Name:lower() == text:lower() then
+                    found = item; break
+                end
+            end
+            return found
+        end
+    end
+    return nil
+end
+
+local function getFullPath(inst)
+    if not inst or not inst:IsDescendantOf(game) then return "?" end
+    local segments = {}
+    local current = inst
+    while current and current ~= game do
+        table.insert(segments, 1, string.format("%s[%s]", current.Name, current.ClassName))
+        current = current.Parent
+    end
+    return "game." .. table.concat(segments, ".")
+end
+
+-- Lista de propriedades comuns por classe fallback
+local COMMON_PROPS = {
+    ["Instance"] = {"Name", "ClassName", "Parent", "Archivable"},
+    ["Workspace"] = {"Gravity", "CurrentCamera"},
+    ["Players"] = {"MaxPlayers", "PreferredPlayers", "RespawnTime"},
+    ["Lighting"] = {"Ambient", "Brightness", "ClockTime", "FogColor", "FogEnd", "FogStart", "OutdoorAmbient", "GlobalShadows", "ShadowSoftness", "Technology"},
+    ["SoundService"] = {"RespectFilteringEnabled", "AmbientReverb", "DistanceFactor", "DopplerScale", "RolloffScale", "Volume"},
+    ["ReplicatedStorage"] = {},
+    ["ServerStorage"] = {},
+    ["StarterGui"] = {"ResetPlayerGuiOnSpawn", "ShowDevelopmentGui"},
+    ["CoreGui"] = {},
+    ["Workspace/BasePart"] = {"Name", "Transparency", "Reflectance", "Material", "Color", "Size", "CFrame", "Anchored", "CanCollide", "CanQuery", "CanTouch", "CastShadow"},
+    ["Workspace/Model"] = {"Name", "PrimaryPart"},
+    ["GuiObject"] = {"Name", "Visible", "Active", "ZIndex", "AnchorPoint", "Position", "Size", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel"},
+    ["TextLabel"] = {"Text", "TextSize", "TextColor3", "TextTransparency", "TextWrapped", "RichText"},
+    ["TextButton"] = {"Text", "TextSize", "TextColor3", "TextTransparency", "TextWrapped", "AutoButtonColor"},
+    ["TextBox"] = {"Text", "TextSize", "TextColor3", "TextTransparency", "TextWrapped", "ClearTextOnFocus", "MultiLine"},
+    ["ImageLabel"] = {"Image", "ImageTransparency", "ScaleType"},
+    ["ImageButton"] = {"Image", "ImageTransparency", "ScaleType"},
+    ["ScrollingFrame"] = {"CanvasSize", "AutomaticCanvasSize", "ScrollBarThickness", "ScrollingDirection"},
+    ["Frame"] = {"BackgroundColor3", "BackgroundTransparency", "BorderSizePixel"},
+    ["Folder"] = {"Name"},
+    ["Sound"] = {"SoundId", "Volume", "PlaybackSpeed", "TimePosition", "Playing", "Looped"},
+    ["Camera"] = {"CFrame", "FieldOfView"},
+    ["Humanoid"] = {"Health", "MaxHealth", "WalkSpeed", "JumpPower", "AutoRotate"},
 }
 
--- Config/histórico
-local USED_FILE = "used_jobids.json"
-local used = {}
-pcall(function()
-    if isfile and isfile(USED_FILE) then
-        local raw = readfile(USED_FILE)
-        local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
-        if ok and type(data) == "table" then used = data end
-    end
-end)
-local function save_used()
-    pcall(function()
-        if writefile then writefile(USED_FILE, HttpService:JSONEncode(used)) end
+-- Executor helpers para propriedades (se existirem)
+local getproperties_fn = rawget(getfenv(), "getproperties") or rawget(getfenv(), "getprops")
+local gethiddenproperty_fn = rawget(getfenv(), "gethiddenproperty")
+local sethiddenproperty_fn = rawget(getfenv(), "sethiddenproperty")
+
+-- ==============================
+--        Construção da GUI
+-- ==============================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "MayunieDexExplorer"
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ResetOnSpawn = false
+pcall(protect_gui, ScreenGui)
+ScreenGui.Parent = GUI_PARENT
+
+local Theme = {
+    bg = Color3.fromRGB(18, 18, 22),
+    panel = Color3.fromRGB(26, 26, 32),
+    panel2 = Color3.fromRGB(32, 32, 40),
+    stroke = Color3.fromRGB(64, 64, 80),
+    text = Color3.fromRGB(235, 235, 245),
+    subtext = Color3.fromRGB(190, 190, 205),
+    accent = Color3.fromRGB(95, 135, 255),
+    ok = Color3.fromRGB(80, 190, 120),
+    warn = Color3.fromRGB(255, 170, 60),
+}
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 980, 0, 560)
+Main.Position = UDim2.new(0.5, -490, 0.5, -280)
+Main.BackgroundColor3 = Theme.panel
+Main.Parent = ScreenGui
+
+local corner = Instance.new("UICorner", Main)
+corner.CornerRadius = UDim.new(0, 14)
+local stroke = Instance.new("UIStroke", Main)
+stroke.Color = Theme.stroke
+stroke.Thickness = 1
+
+local TopBar = Instance.new("Frame")
+TopBar.Name = "TopBar"
+TopBar.BackgroundColor3 = Theme.panel2
+TopBar.Size = UDim2.new(1, 0, 0, 44)
+TopBar.Parent = Main
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 14)
+
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Font = Enum.Font.GothamSemibold
+Title.TextSize = 16
+Title.TextColor3 = Theme.text
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Text = "Mayunie DEX Explorer"
+Title.Size = UDim2.new(0, 240, 1, 0)
+Title.Position = UDim2.new(0, 16, 0, 0)
+Title.Parent = TopBar
+
+local SearchBox = Instance.new("TextBox")
+SearchBox.Size = UDim2.new(0, 280, 0, 28)
+SearchBox.Position = UDim2.new(0, 260, 0, 8)
+SearchBox.BackgroundColor3 = Theme.bg
+SearchBox.TextColor3 = Theme.text
+SearchBox.PlaceholderColor3 = Theme.subtext
+SearchBox.PlaceholderText = "Buscar por Nome ou ClassName"
+SearchBox.Font = Enum.Font.Gotham
+SearchBox.TextSize = 14
+SearchBox.ClearTextOnFocus = false
+Instance.new("UICorner", SearchBox).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", SearchBox).Color = Theme.stroke
+SearchBox.Parent = TopBar
+
+local RefreshBtn = Instance.new("TextButton")
+RefreshBtn.Size = UDim2.new(0, 90, 0, 28)
+RefreshBtn.Position = UDim2.new(0, 550, 0, 8)
+RefreshBtn.BackgroundColor3 = Theme.bg
+RefreshBtn.TextColor3 = Theme.text
+RefreshBtn.Font = Enum.Font.GothamSemibold
+RefreshBtn.TextSize = 14
+RefreshBtn.Text = "Refresh"
+Instance.new("UICorner", RefreshBtn).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", RefreshBtn).Color = Theme.stroke
+RefreshBtn.Parent = TopBar
+
+local CopyPathBtn = Instance.new("TextButton")
+CopyPathBtn.Size = UDim2.new(0, 110, 0, 28)
+CopyPathBtn.Position = UDim2.new(0, 650, 0, 8)
+CopyPathBtn.BackgroundColor3 = Theme.bg
+CopyPathBtn.TextColor3 = Theme.text
+CopyPathBtn.Font = Enum.Font.GothamSemibold
+CopyPathBtn.TextSize = 14
+CopyPathBtn.Text = "Copy Path"
+Instance.new("UICorner", CopyPathBtn).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", CopyPathBtn).Color = Theme.stroke
+CopyPathBtn.Parent = TopBar
+
+local ToggleEditBtn = Instance.new("TextButton")
+ToggleEditBtn.Size = UDim2.new(0, 140, 0, 28)
+ToggleEditBtn.Position = UDim2.new(1, -156, 0, 8)
+ToggleEditBtn.AnchorPoint = Vector2.new(1, 0)
+ToggleEditBtn.BackgroundColor3 = Theme.bg
+ToggleEditBtn.TextColor3 = Theme.warn
+ToggleEditBtn.Font = Enum.Font.GothamSemibold
+ToggleEditBtn.TextSize = 14
+ToggleEditBtn.Text = "Edição: DESLIGADA"
+Instance.new("UICorner", ToggleEditBtn).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", ToggleEditBtn).Color = Theme.stroke
+ToggleEditBtn.Parent = TopBar
+
+-- Corpo com árvore e propriedades
+local Body = Instance.new("Frame")
+Body.BackgroundTransparency = 1
+Body.Position = UDim2.new(0, 0, 0, 44)
+Body.Size = UDim2.new(1, 0, 1, -44)
+Body.Parent = Main
+
+local LeftPane = Instance.new("Frame")
+LeftPane.BackgroundColor3 = Theme.panel
+LeftPane.Size = UDim2.new(0, 360, 1, 0)
+LeftPane.Parent = Body
+Instance.new("UIStroke", LeftPane).Color = Theme.stroke
+
+local Splitter = Instance.new("Frame")
+Splitter.BackgroundColor3 = Theme.stroke
+Splitter.Size = UDim2.new(0, 4, 1, 0)
+Splitter.Position = UDim2.new(0, 360, 0, 0)
+Splitter.Parent = Body
+
+local RightPane = Instance.new("Frame")
+RightPane.BackgroundColor3 = Theme.panel
+RightPane.Position = UDim2.new(0, 364, 0, 0)
+RightPane.Size = UDim2.new(1, -364, 1, 0)
+RightPane.Parent = Body
+Instance.new("UIStroke", RightPane).Color = Theme.stroke
+
+local TreeScroll = Instance.new("ScrollingFrame")
+TreeScroll.BackgroundTransparency = 1
+TreeScroll.BorderSizePixel = 0
+TreeScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+TreeScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+TreeScroll.ScrollBarThickness = 6
+TreeScroll.Size = UDim2.new(1, 0, 1, 0)
+TreeScroll.Parent = LeftPane
+
+local TreeLayout = Instance.new("UIListLayout")
+TreeLayout.Padding = UDim.new(0, 2)
+TreeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TreeLayout.Parent = TreeScroll
+
+local PropHeader = Instance.new("TextLabel")
+PropHeader.BackgroundTransparency = 1
+PropHeader.Font = Enum.Font.GothamSemibold
+PropHeader.TextSize = 16
+PropHeader.TextColor3 = Theme.text
+PropHeader.TextXAlignment = Enum.TextXAlignment.Left
+PropHeader.Text = "Propriedades"
+PropHeader.Size = UDim2.new(1, -16, 0, 28)
+PropHeader.Position = UDim2.new(0, 12, 0, 8)
+PropHeader.Parent = RightPane
+
+local PropScroll = Instance.new("ScrollingFrame")
+PropScroll.BackgroundTransparency = 1
+PropScroll.BorderSizePixel = 0
+PropScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+PropScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+PropScroll.ScrollBarThickness = 6
+PropScroll.Size = UDim2.new(1, -24, 1, -48)
+PropScroll.Position = UDim2.new(0, 12, 0, 40)
+PropScroll.Parent = RightPane
+
+local PropLayout = Instance.new("UIListLayout")
+PropLayout.Padding = UDim.new(0, 4)
+PropLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PropLayout.Parent = PropScroll
+
+-- Barra de status para mensagens
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextSize = 13
+StatusLabel.TextColor3 = Theme.subtext
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Text = ""
+StatusLabel.Size = UDim2.new(1, -16, 0, 24)
+StatusLabel.Position = UDim2.new(0, 12, 1, -28)
+StatusLabel.Parent = RightPane
+
+-- ==============================
+--   Arrastar janela e splitter
+-- ==============================
+do
+    local dragging = false
+    local dragStart, startPos
+    TopBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = Main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    Services.UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
     end)
 end
 
--- Normalização JobId: minúsculas, permite 32 hex sem hífen, remove aspas/chaves
-local function normalize_jobid(s)
-    if type(s) ~= "string" then return nil end
-    s = s:gsub("%s+",""):gsub("[\"{}']","")
-    local lower = s:lower()
-
-    if lower:match("^[%x]+%-%x+%-%x+%-%x+%-%x+$") then
-        return lower
-    end
-    if lower:match("^[a-f0-9]{32}$") then
-        return table.concat({
-            lower:sub(1,8), "-", lower:sub(9,12), "-", lower:sub(13,16),
-            "-", lower:sub(17,20), "-", lower:sub(21,32)
-        })
-    end
-    return nil
+do
+    local resizing = false
+    local dragStart, startX
+    Splitter.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            resizing = true
+            dragStart = input.Position
+            startX = LeftPane.Size.X.Offset
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then resizing = false end
+            end)
+        end
+    end)
+    Services.UserInputService.InputChanged:Connect(function(input)
+        if resizing and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            local w = math.clamp(startX + delta.X, 240, 600)
+            LeftPane.Size = UDim2.new(0, w, 1, 0)
+            Splitter.Position = UDim2.new(0, w, 0, 0)
+            RightPane.Position = UDim2.new(0, w + 4, 0, 0)
+            RightPane.Size = UDim2.new(1, -(w + 4), 1, 0)
+        end
+    end)
 end
 
-local function parse_place(text)
-    local n = tonumber((text or ""):gsub("%s",""))
-    if n and n > 0 then return math.floor(n) end
-    return nil
+-- ==============================
+--           Explorer
+-- ==============================
+local Selected
+local SelectionBox
+
+local function setStatus(msg)
+    StatusLabel.Text = msg or ""
 end
 
--- GUI
-if PG:FindFirstChild("TP_GUI") then PG.TP_GUI:Destroy() end
-local gui = Instance.new("ScreenGui")
-gui.Name = "TP_GUI"
-gui.ResetOnSpawn = false
-gui.Parent = PG
+local function clearChildren(gui)
+    for _,c in ipairs(gui:GetChildren()) do
+        if not c:IsA("UIListLayout") then c:Destroy() end
+    end
+end
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(460, 260)
-frame.Position = UDim2.new(0.5, -230, 0.45, -130)
-frame.BackgroundColor3 = Color3.fromRGB(26,26,32)
-frame.BorderSizePixel = 0
-frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
-local stroke = Instance.new("UIStroke", frame)
-stroke.Thickness = 2
-stroke.Color = Color3.fromRGB(60,120,255)
-stroke.Transparency = 0.6
+local function rowProperty(name, value, inst, allowEdit)
+    local Row = Instance.new("Frame")
+    Row.BackgroundColor3 = Theme.bg
+    Row.Size = UDim2.new(1, 0, 0, 30)
+    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", Row).Color = Theme.stroke
 
-local dragging, dragStart, startPos
-frame.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = true
-        dragStart = i.Position
-        startPos = frame.Position
-        i.Changed:Connect(function()
-            if i.UserInputState == Enum.UserInputState.End then dragging = false end
+    local L = Instance.new("TextLabel")
+    L.BackgroundTransparency = 1
+    L.Font = Enum.Font.GothamSemibold
+    L.TextSize = 13
+    L.TextColor3 = Theme.text
+    L.TextXAlignment = Enum.TextXAlignment.Left
+    L.Text = name
+    L.Size = UDim2.new(0.35, -8, 1, 0)
+    L.Position = UDim2.new(0, 8, 0, 0)
+    L.Parent = Row
+
+    local V = Instance.new("TextBox")
+    V.BackgroundTransparency = allowEdit and 0 or 1
+    V.BackgroundColor3 = Theme.panel2
+    V.ClearTextOnFocus = false
+    V.Font = Enum.Font.Gotham
+    V.TextSize = 13
+    V.TextXAlignment = Enum.TextXAlignment.Left
+    V.TextColor3 = allowEdit and Theme.text or Theme.subtext
+    V.TextEditable = allowEdit
+    V.Text = serialize(value)
+    V.Size = UDim2.new(0.65, -12, 1, -8)
+    V.Position = UDim2.new(0.35, 4, 0, 4)
+    Instance.new("UICorner", V).CornerRadius = UDim.new(0, 6)
+    if allowEdit then Instance.new("UIStroke", V).Color = Theme.stroke end
+    V.Parent = Row
+
+    if allowEdit then
+        V.FocusLost:Connect(function(enter)
+            if not enter then return end
+            local ok, cur = pcall(function() return inst[name] end)
+            if not ok then
+                setStatus("Propriedade protegida ou inexistente")
+                return
+            end
+            local new = smartParse(cur, V.Text)
+            if new == nil then
+                setStatus("Formato inválido para " .. name)
+                V.Text = serialize(cur)
+                return
+            end
+            local success, err = pcall(function()
+                inst[name] = new
+            end)
+            if success then
+                V.Text = serialize(inst[name])
+                setStatus("Atualizado " .. name)
+            else
+                setStatus("Erro ao atualizar: " .. tostring(err))
+                V.Text = serialize(cur)
+            end
         end)
     end
-end)
-UserInputService.InputChanged:Connect(function(i)
-    if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
-        local d = i.Position - dragStart
-        frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+
+    return Row
+end
+
+local function getClassFallbackProps(inst)
+    local class = inst.ClassName
+    if inst:IsA("BasePart") then
+        return COMMON_PROPS["Workspace/BasePart"]
+    elseif inst:IsA("Model") then
+        return COMMON_PROPS["Workspace/Model"]
+    elseif inst:IsA("GuiObject") then
+        return COMMON_PROPS["GuiObject"]
+    else
+        return COMMON_PROPS[class] or COMMON_PROPS["Instance"]
     end
-end)
-
-local function label(parent, props)
-    local x = Instance.new("TextLabel")
-    x.BackgroundTransparency = 1
-    x.Font = props.bold and Enum.Font.GothamBold or Enum.Font.Gotham
-    x.TextSize = props.size or 14
-    x.TextXAlignment = props.align or Enum.TextXAlignment.Left
-    x.Text = props.text or ""
-    x.TextColor3 = props.color or Color3.fromRGB(220,220,220)
-    x.Size = props.size2 or UDim2.new(1, -20, 0, 24)
-    x.Position = props.pos or UDim2.fromOffset(10, 10)
-    x.Parent = parent
-    return x
 end
 
-local function textbox(parent, placeholder, pos, w)
-    local tb = Instance.new("TextBox")
-    tb.Font = Enum.Font.Gotham
-    tb.TextSize = 14
-    tb.PlaceholderText = placeholder
-    tb.Text = ""
-    tb.ClearTextOnFocus = false
-    tb.BackgroundColor3 = Color3.fromRGB(36,36,44)
-    tb.TextColor3 = Color3.fromRGB(255,255,255)
-    tb.BorderSizePixel = 0
-    tb.Size = UDim2.fromOffset(w or 250, 28)
-    tb.Position = pos
-    tb.Parent = parent
-    Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 6)
-    local s = Instance.new("UIStroke", tb)
-    s.Thickness = 1
-    s.Color = Color3.fromRGB(70,70,90)
-    s.Transparency = 0.4
-    return tb
-end
+local function buildPropertyPanel(inst, allowEdit)
+    clearChildren(PropScroll)
+    PropHeader.Text = ("Propriedades — %s (%s)"):format(inst.Name, inst.ClassName)
 
-local function button(parent, text, pos, w)
-    local b = Instance.new("TextButton")
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 14
-    b.Text = text
-    b.TextColor3 = Color3.fromRGB(255,255,255)
-    b.BackgroundColor3 = Color3.fromRGB(40,110,255)
-    b.AutoButtonColor = false
-    b.Size = UDim2.fromOffset(w or 140, 32)
-    b.Position = pos
-    b.Parent = parent
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-    b.MouseEnter:Connect(function()
-        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(70,140,255)}):Play()
-    end)
-    b.MouseLeave:Connect(function()
-        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(40,110,255)}):Play()
-    end)
-    return b
-end
+    -- Nome e classe sempre no topo
+    PropLayout.Parent = nil
+    rowProperty("Name", inst.Name, inst, allowEdit).Parent = PropScroll
+    rowProperty("ClassName", inst.ClassName, inst, false).Parent = PropScroll
 
-label(frame, {text = TX.title, bold = true, size = 18, size2 = UDim2.new(1,-20,0,28), pos = UDim2.fromOffset(10,8), color = Color3.fromRGB(255,255,255)})
-label(frame, {text = TX.toggle, size = 12, size2 = UDim2.new(1,-20,0,16), pos = UDim2.fromOffset(10,30), color = Color3.fromRGB(170,170,170)})
-
-label(frame, {text = TX.place, pos = UDim2.fromOffset(12,64)})
-local placeBox = textbox(frame, TX.place, UDim2.fromOffset(105,64), 200)
-placeBox.Text = tostring(game.PlaceId) -- usa o PlaceId atual por padrão
-
-local useCurrent = Instance.new("TextButton")
-useCurrent.Font = Enum.Font.Gotham
-useCurrent.TextSize = 13
-useCurrent.TextXAlignment = Enum.TextXAlignment.Left
-useCurrent.AutoButtonColor = false
-useCurrent.BackgroundColor3 = Color3.fromRGB(36,36,44)
-useCurrent.TextColor3 = Color3.fromRGB(220,220,220)
-useCurrent.Text = "☑ "..TX.useCurrent
-useCurrent.Size = UDim2.fromOffset(180, 26)
-useCurrent.Position = UDim2.fromOffset(315, 64)
-useCurrent.Parent = frame
-Instance.new("UICorner", useCurrent).CornerRadius = UDim.new(0, 6)
-local useCurrentOn = true
-useCurrent.MouseButton1Click:Connect(function()
-    useCurrentOn = not useCurrentOn
-    useCurrent.Text = (useCurrentOn and "☑ " or "☐ ")..TX.useCurrent
-    if useCurrentOn then placeBox.Text = tostring(game.PlaceId) end
-end)
-
-label(frame, {text = TX.job, pos = UDim2.fromOffset(12,100)})
-local jobBox = textbox(frame, TX.job, UDim2.fromOffset(105,100), 340)
-
-local pasteBtn = button(frame, TX.paste, UDim2.fromOffset(12, 140), 120)
-local tpBtn    = button(frame, TX.tp,    UDim2.fromOffset(146, 140), 140)
-local tpSimple = button(frame, TX.tpsimple, UDim2.fromOffset(300, 140), 150)
-
-label(frame, {text = TX.status..":", pos = UDim2.fromOffset(12,180)})
-local statusText = label(frame, {text = TX.ok, pos = UDim2.fromOffset(72,180), color = Color3.fromRGB(120,255,140)})
-
-local saveChk = Instance.new("TextButton")
-saveChk.Font = Enum.Font.Gotham
-saveChk.TextSize = 13
-saveChk.TextXAlignment = Enum.TextXAlignment.Left
-saveChk.AutoButtonColor = false
-saveChk.BackgroundColor3 = Color3.fromRGB(36,36,44)
-saveChk.TextColor3 = Color3.fromRGB(220,220,220)
-saveChk.Text = "☑ "..((lang=="pt") and "Salvar JobIds usados" or "Save used JobIds")
-saveChk.Size = UDim2.new(1, -24, 0, 26)
-saveChk.Position = UDim2.fromOffset(12, 212)
-saveChk.Parent = frame
-Instance.new("UICorner", saveChk).CornerRadius = UDim.new(0, 6)
-local saveEnabled = true
-saveChk.MouseButton1Click:Connect(function()
-    saveEnabled = not saveEnabled
-    saveChk.Text = (saveEnabled and "☑ " or "☐ ")..((lang=="pt") and "Salvar JobIds usados" or "Save used JobIds")
-end)
-
--- TeleportInitFailed diagnostics
-local connected = false
-local function connectFailListener()
-    if connected then return end
-    connected = true
-    TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage)
-        if player ~= LP then return end
-        local msg = string.format("Falha: %s | %s", tostring(teleportResult), tostring(errorMessage))
-        statusText.Text = msg
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
-        log("TeleportInitFailed: "..msg)
-        notify("Teleport", msg)
-    end)
-end
-connectFailListener()
-
--- Botão Colar
-pasteBtn.MouseButton1Click:Connect(function()
-    local got = nil
-    local ok = pcall(function()
-        if getclipboard then got = getclipboard() return end
-        if clipboard and clipboard.get then got = clipboard.get() return end
-    end)
-    if ok and type(got) == "string" and #got > 0 then
-        local norm = normalize_jobid(got)
-        jobBox.Text = norm or got
-        if norm then
-            statusText.Text = TX.ok
-            statusText.TextColor3 = Color3.fromRGB(120,255,140)
-        else
-            statusText.Text = TX.badGuid
-            statusText.TextColor3 = Color3.fromRGB(255,180,120)
+    -- Atributos do Roblox
+    local propsListed = {}
+    local function addProp(p)
+        if propsListed[p] then return end
+        local ok, v = pcall(function() return inst[p] end)
+        if ok then
+            propsListed[p] = true
+            rowProperty(p, v, inst, allowEdit).Parent = PropScroll
         end
-    else
-        statusText.Text = TX.noclip
-        statusText.TextColor3 = Color3.fromRGB(255,180,120)
-        notify("Clipboard", TX.noclip)
-    end
-end)
-
--- Execução do Teleport
-local function doTeleport()
-    local placeId = useCurrentOn and game.PlaceId or parse_place(placeBox.Text)
-    if not placeId then
-        statusText.Text = TX.noPlace
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
-        notify("Teleport", TX.noPlace)
-        return
-    end
-    local norm = normalize_jobid(tostring(jobBox.Text or ""))
-    if not norm then
-        statusText.Text = TX.badGuid
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
-        notify("Teleport", TX.badGuid)
-        return
     end
 
-    statusText.Text = TX.tpStart.." "..placeId
-    statusText.TextColor3 = Color3.fromRGB(220,220,120)
-    log("TeleportToPlaceInstance -> placeId="..tostring(placeId).." jobId="..tostring(norm))
-
-    if saveEnabled then
-        used[norm] = true
-        save_used()
+    -- via executor getproperties
+    if getproperties_fn then
+        local ok, list = pcall(function() return getproperties_fn(inst) end)
+        if ok and type(list) == "table" then
+            for _,p in ipairs(list) do
+                addProp(p)
+            end
+        end
     end
 
-    connectFailListener()
+    -- fallback por classe
+    for _,p in ipairs(getClassFallbackProps(inst)) do
+        addProp(p)
+    end
 
-    local ok, err = pcall(function()
-        TeleportService:TeleportToPlaceInstance(placeId, norm, LP)
+    -- Attributes do usuário
+    local attrs = {}
+    pcall(function() attrs = inst:GetAttributes() end)
+    if attrs and next(attrs) ~= nil then
+        local sep = Instance.new("TextLabel")
+        sep.BackgroundTransparency = 1
+        sep.Text = "Atributos"
+        sep.Font = Enum.Font.GothamSemibold
+        sep.TextSize = 14
+        sep.TextColor3 = Theme.subtext
+        sep.TextXAlignment = Enum.TextXAlignment.Left
+        sep.Size = UDim2.new(1, -8, 0, 24)
+        sep.Parent = PropScroll
+        for k,v in pairs(attrs) do
+            local Row = Instance.new("Frame")
+            Row.BackgroundColor3 = Theme.bg
+            Row.Size = UDim2.new(1, 0, 0, 30)
+            Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+            Instance.new("UIStroke", Row).Color = Theme.stroke
+
+            local L = Instance.new("TextLabel")
+            L.BackgroundTransparency = 1
+            L.Font = Enum.Font.GothamSemibold
+            L.TextSize = 13
+            L.TextColor3 = Theme.text
+            L.TextXAlignment = Enum.TextXAlignment.Left
+            L.Text = "[Attr] "..k
+            L.Size = UDim2.new(0.35, -8, 1, 0)
+            L.Position = UDim2.new(0, 8, 0, 0)
+            L.Parent = Row
+
+            local V = Instance.new("TextBox")
+            V.BackgroundColor3 = Theme.panel2
+            V.ClearTextOnFocus = false
+            V.Font = Enum.Font.Gotham
+            V.TextSize = 13
+            V.TextXAlignment = Enum.TextXAlignment.Left
+            V.TextColor3 = Theme.text
+            V.Text = serialize(v)
+            V.Size = UDim2.new(0.65, -12, 1, -8)
+            V.Position = UDim2.new(0.35, 4, 0, 4)
+            Instance.new("UICorner", V).CornerRadius = UDim.new(0, 6)
+            Instance.new("UIStroke", V).Color = Theme.stroke
+            V.Parent = Row
+
+            V.FocusLost:Connect(function(enter)
+                if not enter then return end
+                local parsed = tonumber(V.Text) or (V.Text:lower() == "true" and true) or (V.Text:lower() == "false" and false) or V.Text
+                pcall(function() inst:SetAttribute(k, parsed) end)
+            end)
+
+            Row.Parent = PropScroll
+        end
+    end
+
+    PropLayout.Parent = PropScroll
+    PropScroll.CanvasSize = UDim2.new(0, 0, 0, PropLayout.AbsoluteContentSize.Y + 16)
+
+    -- Conecta auto-update de propriedades básicas
+    local conn
+    conn = inst.Changed:Connect(function(p)
+        -- Atualiza só a linha do Name rapidamente
+        if p == "Name" then
+            PropHeader.Text = ("Propriedades — %s (%s)"):format(inst.Name, inst.ClassName)
+        end
     end)
-    if ok then
-        statusText.Text = TX.tpDone
-        statusText.TextColor3 = Color3.fromRGB(120,255,140)
-        notify("Teleport", TX.tpDone)
-    else
-        statusText.Text = tostring(err)
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
-        log("Teleport pcall error: "..tostring(err))
-        notify("Teleport", tostring(err))
-    end
+    inst.AncestryChanged:Connect(function()
+        if not inst:IsDescendantOf(game) then
+            setStatus("Instância destruída")
+            Selected = nil
+            clearChildren(PropScroll)
+        end
+    end)
 end
 
-tpBtn.MouseButton1Click:Connect(doTeleport)
+local function makeTreeRow(inst, depth)
+    local Row = Instance.new("Frame")
+    Row.BackgroundColor3 = Theme.bg
+    Row.Size = UDim2.new(1, -8, 0, 26)
+    Row.LayoutOrder = depth
+    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", Row).Color = Theme.stroke
 
--- Teleport simples para diagnóstico: só Teleport(placeId)
-tpSimple.MouseButton1Click:Connect(function()
-    local placeId = useCurrentOn and game.PlaceId or parse_place(placeBox.Text)
-    if not placeId then
-        statusText.Text = TX.noPlace
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
+    local Toggle = Instance.new("TextButton")
+    Toggle.BackgroundTransparency = 1
+    Toggle.Text = "▶"
+    Toggle.Font = Enum.Font.GothamSemibold
+    Toggle.TextSize = 12
+    Toggle.TextColor3 = Theme.subtext
+    Toggle.Size = UDim2.new(0, 24, 1, 0)
+    Toggle.Position = UDim2.new(0, 6 + depth * 12, 0, 0)
+    Toggle.Parent = Row
+
+    local NameBtn = Instance.new("TextButton")
+    NameBtn.BackgroundTransparency = 1
+    NameBtn.TextXAlignment = Enum.TextXAlignment.Left
+    NameBtn.Font = Enum.Font.Gotham
+    NameBtn.TextSize = 13
+    NameBtn.TextColor3 = Theme.text
+    NameBtn.Text = string.format("%s  [%s]", inst.Name, inst.ClassName)
+    NameBtn.Size = UDim2.new(1, -60 - depth * 12, 1, 0)
+    NameBtn.Position = UDim2.new(0, 30 + depth * 12, 0, 0)
+    NameBtn.Parent = Row
+
+    local ChildrenContainer = Instance.new("Frame")
+    ChildrenContainer.BackgroundTransparency = 1
+    ChildrenContainer.Size = UDim2.new(1, 0, 0, 0)
+    ChildrenContainer.Parent = Row
+
+    local ChildLayout = Instance.new("UIListLayout")
+    ChildLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    ChildLayout.Padding = UDim.new(0, 2)
+    ChildLayout.Parent = ChildrenContainer
+
+    local expanded = false
+    local function refreshChildren()
+        clearChildren(ChildrenContainer)
+        local kids = {}
+        pcall(function() kids = inst:GetChildren() end)
+        table.sort(kids, function(a, b) return a.Name:lower() < b.Name:lower() end)
+        for _,child in ipairs(kids) do
+            local sub = makeTreeRow(child, depth + 1)
+            sub.Parent = ChildrenContainer
+        end
+        ChildrenContainer.Size = UDim2.new(1, 0, 0, ChildLayout.AbsoluteContentSize.Y)
+        ChildLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            ChildrenContainer.Size = UDim2.new(1, 0, 0, ChildLayout.AbsoluteContentSize.Y)
+            Services.RunService.Heartbeat:Wait()
+            TreeScroll.CanvasSize = UDim2.new(0, 0, 0, TreeLayout.AbsoluteContentSize.Y + 16)
+        end)
+    end
+
+    Toggle.MouseButton1Click:Connect(function()
+        expanded = not expanded
+        Toggle.Text = expanded and "▼" or "▶"
+        if expanded then
+            refreshChildren()
+        else
+            clearChildren(ChildrenContainer)
+            ChildrenContainer.Size = UDim2.new(1, 0, 0, 0)
+        end
+        Services.RunService.Heartbeat:Wait()
+        TreeScroll.CanvasSize = UDim2.new(0, 0, 0, TreeLayout.AbsoluteContentSize.Y + 16)
+    end)
+
+    NameBtn.MouseButton1Click:Connect(function()
+        Selected = inst
+        buildPropertyPanel(inst, ToggleEditBtn.Text:find("LIGADA") ~= nil)
+        setStatus("Selecionado: " .. getFullPath(inst))
+
+        -- SelectionBox para partes
+        if SelectionBox then SelectionBox:Destroy() end
+        if inst:IsA("BasePart") then
+            SelectionBox = Instance.new("SelectionBox")
+            SelectionBox.Name = "MayunieDexSelection"
+            SelectionBox.LineThickness = 0.03
+            SelectionBox.SurfaceTransparency = 1
+            SelectionBox.Color3 = Theme.accent
+            SelectionBox.Adornee = inst
+            SelectionBox.Parent = inst
+        end
+    end)
+
+    -- Auto-update do ramo
+    inst.ChildAdded:Connect(function()
+        if expanded then refreshChildren() end
+    end)
+    inst.ChildRemoved:Connect(function()
+        if expanded then refreshChildren() end
+    end)
+
+    return Row
+end
+
+local ROOTS = {
+    Services.Workspace,
+    Services.Players,
+    Services.ReplicatedStorage,
+    Services.StarterGui,
+    Services.StarterPack,
+    Services.ServerStorage,
+    Services.ServerScriptService,
+    Services.ReplicatedFirst,
+    Services.Lighting,
+    Services.SoundService,
+    Services.HttpService,
+    Services.Chat,
+    Services.CoreGui,
+}
+
+local function buildTree()
+    clearChildren(TreeScroll)
+    for i,root in ipairs(ROOTS) do
+        local node = makeTreeRow(root, 0)
+        node.Parent = TreeScroll
+    end
+    TreeScroll.CanvasSize = UDim2.new(0, 0, 0, TreeLayout.AbsoluteContentSize.Y + 16)
+end
+
+-- ==============================
+--           Busca
+-- ==============================
+local ResultsDrop = Instance.new("Frame")
+ResultsDrop.BackgroundColor3 = Theme.panel2
+ResultsDrop.Visible = false
+ResultsDrop.Size = UDim2.new(0, 280, 0, 180)
+ResultsDrop.Position = UDim2.new(0, 260, 0, 40)
+ResultsDrop.Parent = Main
+Instance.new("UICorner", ResultsDrop).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", ResultsDrop).Color = Theme.stroke
+
+local ResultsScroll = Instance.new("ScrollingFrame")
+ResultsScroll.BackgroundTransparency = 1
+ResultsScroll.Size = UDim2.new(1, -8, 1, -8)
+ResultsScroll.Position = UDim2.new(0, 4, 0, 4)
+ResultsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+ResultsScroll.ScrollBarThickness = 6
+ResultsScroll.Parent = ResultsDrop
+local ResultsLayout = Instance.new("UIListLayout", ResultsScroll)
+ResultsLayout.Padding = UDim.new(0, 4)
+
+local function addResultItem(inst)
+    local Btn = Instance.new("TextButton")
+    Btn.BackgroundColor3 = Theme.bg
+    Btn.Size = UDim2.new(1, 0, 0, 28)
+    Btn.TextXAlignment = Enum.TextXAlignment.Left
+    Btn.Font = Enum.Font.Gotham
+    Btn.TextSize = 13
+    Btn.TextColor3 = Theme.text
+    Btn.Text = inst.Name .. "  [" .. inst.ClassName .. "]"
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", Btn).Color = Theme.stroke
+    Btn.Parent = ResultsScroll
+
+    Btn.MouseButton1Click:Connect(function()
+        Selected = inst
+        buildPropertyPanel(inst, ToggleEditBtn.Text:find("LIGADA") ~= nil)
+        setStatus("Selecionado: " .. getFullPath(inst))
+        ResultsDrop.Visible = false
+
+        if SelectionBox then SelectionBox:Destroy() end
+        if inst:IsA("BasePart") then
+            SelectionBox = Instance.new("SelectionBox")
+            SelectionBox.LineThickness = 0.03
+            SelectionBox.SurfaceTransparency = 1
+            SelectionBox.Color3 = Theme.accent
+            SelectionBox.Adornee = inst
+            SelectionBox.Parent = inst
+        end
+    end)
+end
+
+local function runSearch(query)
+    clearChildren(ResultsScroll)
+    if not query or query == "" then
+        ResultsDrop.Visible = false
         return
     end
-    statusText.Text = TX.tpStart.." "..placeId.." [simple]"
-    statusText.TextColor3 = Color3.fromRGB(220,220,120)
-    log("Teleport (simple) -> placeId="..tostring(placeId))
-    connectFailListener()
-    local ok, err = pcall(function()
-        TeleportService:Teleport(placeId, LP)
-    end)
-    if ok then
-        statusText.Text = TX.tpDone.." [simple]"
-        statusText.TextColor3 = Color3.fromRGB(120,255,140)
+    query = query:lower()
+
+    local matches = {}
+    local function scan(root)
+        for _,d in ipairs(root:GetDescendants()) do
+            local ok, cname = pcall(function() return d.ClassName end)
+            local ok2, nm = pcall(function() return d.Name end)
+            if ok and ok2 then
+                if nm:lower():find(query, 1, true) or cname:lower():find(query, 1, true) then
+                    table.insert(matches, d)
+                    if #matches >= 200 then return end
+                end
+            end
+        end
+    end
+    for _,root in ipairs(ROOTS) do
+        pcall(scan, root)
+        if #matches >= 200 then break end
+    end
+
+    for _,inst in ipairs(matches) do
+        addResultItem(inst)
+    end
+    ResultsDrop.Visible = #matches > 0
+    ResultsScroll.CanvasSize = UDim2.new(0, 0, 0, ResultsLayout.AbsoluteContentSize.Y + 8)
+end
+
+SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    runSearch(SearchBox.Text)
+end)
+
+-- ==============================
+--     Botões de topo e toggle
+-- ==============================
+RefreshBtn.MouseButton1Click:Connect(function()
+    buildTree()
+    setStatus("Árvore atualizada")
+end)
+
+CopyPathBtn.MouseButton1Click:Connect(function()
+    if not Selected then setStatus("Nada selecionado") return end
+    local path = getFullPath(Selected)
+    if safeSetClipboard(path) then
+        setStatus("Caminho copiado")
     else
-        statusText.Text = tostring(err)
-        statusText.TextColor3 = Color3.fromRGB(255,120,120)
-        log("Teleport simple error: "..tostring(err))
+        setStatus("Clipboard indisponível — exibindo no status")
+        StatusLabel.Text = path
     end
 end)
 
--- Enter envia
-jobBox.FocusLost:Connect(function(enterPressed)
-    if enterPressed then doTeleport() end
+ToggleEditBtn.MouseButton1Click:Connect(function()
+    local enabled = ToggleEditBtn.Text:find("DESLIGADA") ~= nil
+    if enabled then
+        ToggleEditBtn.Text = "Edição: LIGADA"
+        ToggleEditBtn.TextColor3 = Theme.ok
+        if Selected then buildPropertyPanel(Selected, true) end
+        setStatus("Edição habilitada")
+    else
+        ToggleEditBtn.Text = "Edição: DESLIGADA"
+        ToggleEditBtn.TextColor3 = Theme.warn
+        if Selected then buildPropertyPanel(Selected, false) end
+        setStatus("Edição desabilitada")
+    end
 end)
 
--- Toggle de visibilidade
+-- Hotkey RightCtrl para mostrar/ocultar
 local visible = true
-UserInputService.InputBegan:Connect(function(i, gpe)
-    if gpe then return end
-    if i.KeyCode == Enum.KeyCode.RightShift then
+Services.UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightControl then
         visible = not visible
-        gui.Enabled = visible
+        ScreenGui.Enabled = visible
     end
 end)
 
-log("GUI pronta. Digite o JobId e clique Teleportar. Se falhar, veja o Status, a notificação e o output.")
-notify("Teleport GUI", "Pronta. Informe o JobId e clique Teleportar.")
+-- ==============================
+--     Inicialização da árvore
+-- ==============================
+buildTree()
+setStatus("Pronto")
+
+-- Opcional: tente selecionar Workspace por padrão
+task.defer(function()
+    local ok, _ = pcall(function()
+        Selected = Services.Workspace
+        buildPropertyPanel(Selected, false)
+        setStatus("Selecionado: Workspace")
+    end)
+end)
