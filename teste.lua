@@ -1,9 +1,6 @@
--- Mayunie DEX Explorer - Unified Emulator Friendly
--- Recursos: arvore hierarquica, busca, painel de propriedades com edicao opcional, copy path, SelectionBox, minimizar, compacto, responsivo
--- Tecla: RightCtrl alterna visibilidade
-
--- ===== Boot seguro e compat =====
+-- Mayunie DEX Explorer - V2 (Centered + AutoHeight Tree + Responsive Topbar)
 if not game:IsLoaded() then game.Loaded:Wait() end
+
 getgenv = getgenv or function() return _G end
 local env = (getgenv and getgenv()) or _G
 env.setclipboard = env.setclipboard or function() end
@@ -22,6 +19,7 @@ pcall(function() local old = Services.CoreGui:FindFirstChild("MayunieDexExplorer
 local protect_gui = rawget(getfenv(), "syn") and syn.protect_gui or (protectgui or function() end)
 local GUI_PARENT = (gethui and gethui()) or Services.CoreGui
 
+-- Helpers
 local function typeofRbx(v) local ok,t=pcall(function()return typeof(v)end); if ok then return t end; local mt=getmetatable(v); return mt and mt.__type or type(v) end
 local function safeSetClipboard(text) local ok=pcall(function() setclipboard(text) end); return ok end
 local function getFullPath(inst)
@@ -31,7 +29,6 @@ local function getFullPath(inst)
     return "game."..table.concat(seg,".")
 end
 
--- ===== Serializacao e parse =====
 local function serialize(v)
     local t=typeofRbx(v)
     if t=="Instance" then return ("%s (%s)"):format(v.Name,v.ClassName)
@@ -66,17 +63,12 @@ local function smartParse(targetValue, txt)
     elseif t=="number" then return tonumber(txt)
     elseif t=="string" then return txt
     elseif t=="EnumItem" then
-        local enumType=tostring(targetValue.EnumType) -- "Enum.Material"
+        local enumType=tostring(targetValue.EnumType)
         local fam=Enum[enumType:match("Enum%.(.+)$") or ""]
-        if fam then
-            for _,it in ipairs(fam:GetEnumItems()) do
-                if it.Name:lower()==txt:lower() then return it end
-            end
-        end
+        if fam then for _,it in ipairs(fam:GetEnumItems()) do if it.Name:lower()==txt:lower() then return it end end end
     end
 end
 
--- ===== Propriedades por classe =====
 local COMMON_PROPS = {
     ["Instance"]={"Name","ClassName","Parent","Archivable"},
     ["Workspace"]={"Gravity","CurrentCamera"},
@@ -108,20 +100,22 @@ end
 
 local getproperties_fn = rawget(getfenv(), "getproperties") or rawget(getfenv(), "getprops")
 
--- ===== GUI base =====
+-- Tema
 local Theme = {
     bg=Color3.fromRGB(18,18,22), panel=Color3.fromRGB(26,26,32), panel2=Color3.fromRGB(32,32,40),
     stroke=Color3.fromRGB(64,64,80), text=Color3.fromRGB(235,235,245), subtext=Color3.fromRGB(190,190,205),
     accent=Color3.fromRGB(95,135,255), ok=Color3.fromRGB(80,190,120), warn=Color3.fromRGB(255,170,60)
 }
 
+-- GUI base
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name="MayunieDexExplorer"; ScreenGui.IgnoreGuiInset=true; ScreenGui.ResetOnSpawn=false
 pcall(protect_gui, ScreenGui); ScreenGui.Parent = GUI_PARENT
 
 local Main = Instance.new("Frame")
-Main.Name="Main"; Main.Size=UDim2.fromOffset(980,560); Main.Position=UDim2.fromScale(0.5,0.5)
-Main.AnchorPoint=Vector2.new(0.5,0.5); Main.BackgroundColor3=Theme.panel; Main.Parent=ScreenGui
+Main.Name="Main"; Main.Size=UDim2.fromOffset(980,560)
+Main.AnchorPoint=Vector2.new(0.5,0.5); Main.Position=UDim2.fromScale(0.5,0.5)
+Main.BackgroundColor3=Theme.panel; Main.Parent=ScreenGui
 Instance.new("UICorner",Main).CornerRadius=UDim.new(0,14); local stroke=Instance.new("UIStroke",Main); stroke.Color=Theme.stroke; stroke.Thickness=1
 
 local TopBar = Instance.new("Frame"); TopBar.Name="TopBar"; TopBar.BackgroundColor3=Theme.panel2; TopBar.Size=UDim2.new(1,0,0,44); TopBar.Parent=Main
@@ -129,51 +123,62 @@ Instance.new("UICorner",TopBar).CornerRadius=UDim.new(0,14)
 
 local Title = Instance.new("TextLabel")
 Title.BackgroundTransparency=1; Title.Font=Enum.Font.GothamSemibold; Title.TextSize=16; Title.TextColor3=Theme.text
-Title.TextXAlignment=Enum.TextXAlignment.Left; Title.Text="Mayunie DEX Explorer"; Title.Size=UDim2.new(0,240,1,0); Title.Position=UDim2.new(0,16,0,0); Title.Parent=TopBar
+Title.TextXAlignment=Enum.TextXAlignment.Left; Title.Text="Mayunie DEX Explorer"
+Title.Size=UDim2.new(0,200,1,0); Title.Position=UDim2.new(0,16,0,0); Title.Parent=TopBar
+
+local TopRight = Instance.new("Frame")
+TopRight.BackgroundTransparency=1
+TopRight.Size = UDim2.new(1,-232,1,0)   -- espaço restante ao lado do título
+TopRight.Position = UDim2.new(0,228,0,0)
+TopRight.Parent = TopBar
+
+local H = Instance.new("UIListLayout", TopRight)
+H.FillDirection = Enum.FillDirection.Horizontal
+H.HorizontalAlignment = Enum.HorizontalAlignment.Right
+H.VerticalAlignment = Enum.VerticalAlignment.Center
+H.Padding = UDim.new(0,6)
 
 local SearchBox = Instance.new("TextBox")
-SearchBox.Size=UDim2.new(0,280,0,28); SearchBox.Position=UDim2.new(0,260,0,8); SearchBox.BackgroundColor3=Theme.bg; SearchBox.TextColor3=Theme.text
-SearchBox.PlaceholderColor3=Theme.subtext; SearchBox.PlaceholderText="Buscar por Nome ou ClassName"; SearchBox.Font=Enum.Font.Gotham; SearchBox.TextSize=14
-SearchBox.ClearTextOnFocus=false; Instance.new("UICorner",SearchBox).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",SearchBox).Color=Theme.stroke; SearchBox.Parent=TopBar
+SearchBox.Size=UDim2.new(0,220,0,28); SearchBox.BackgroundColor3=Theme.bg; SearchBox.TextColor3=Theme.text
+SearchBox.PlaceholderColor3=Theme.subtext; SearchBox.PlaceholderText="Buscar por Nome ou ClassName"
+SearchBox.Font=Enum.Font.Gotham; SearchBox.TextSize=14; SearchBox.ClearTextOnFocus=false
+Instance.new("UICorner",SearchBox).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",SearchBox).Color=Theme.stroke
+SearchBox.Parent = TopRight
 
-local RefreshBtn = Instance.new("TextButton")
-RefreshBtn.Size=UDim2.new(0,90,0,28); RefreshBtn.Position=UDim2.new(0,550,0,8); RefreshBtn.BackgroundColor3=Theme.bg; RefreshBtn.TextColor3=Theme.text
-RefreshBtn.Font=Enum.Font.GothamSemibold; RefreshBtn.TextSize=14; RefreshBtn.Text="Refresh"; Instance.new("UICorner",RefreshBtn).CornerRadius=UDim.new(0,8)
-Instance.new("UIStroke",RefreshBtn).Color=Theme.stroke; RefreshBtn.Parent=TopBar
+local MoreBtn = Instance.new("TextButton")
+MoreBtn.Size = UDim2.new(0,36,0,28); MoreBtn.BackgroundColor3=Theme.bg; MoreBtn.Text="⋮"; MoreBtn.Font=Enum.Font.GothamBold
+MoreBtn.TextColor3=Theme.text; MoreBtn.TextSize=18
+Instance.new("UICorner",MoreBtn).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",MoreBtn).Color=Theme.stroke
+MoreBtn.Parent = TopRight
 
-local CopyPathBtn = Instance.new("TextButton")
-CopyPathBtn.Size=UDim2.new(0,110,0,28); CopyPathBtn.Position=UDim2.new(0,650,0,8); CopyPathBtn.BackgroundColor3=Theme.bg; CopyPathBtn.TextColor3=Theme.text
-CopyPathBtn.Font=Enum.Font.GothamSemibold; CopyPathBtn.TextSize=14; CopyPathBtn.Text="Copy Path"; Instance.new("UICorner",CopyPathBtn).CornerRadius=UDim.new(0,8)
-Instance.new("UIStroke",CopyPathBtn).Color=Theme.stroke; CopyPathBtn.Parent=TopBar
-
-local ToggleEditBtn = Instance.new("TextButton")
-ToggleEditBtn.Size=UDim2.new(0,140,0,28); ToggleEditBtn.Position=UDim2.new(1,-156,0,8); ToggleEditBtn.AnchorPoint=Vector2.new(1,0)
-ToggleEditBtn.BackgroundColor3=Theme.bg; ToggleEditBtn.TextColor3=Theme.warn; ToggleEditBtn.Font=Enum.Font.GothamSemibold; ToggleEditBtn.TextSize=14
-ToggleEditBtn.Text="Edicao: DESLIGADA"; Instance.new("UICorner",ToggleEditBtn).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",ToggleEditBtn).Color=Theme.stroke; ToggleEditBtn.Parent=TopBar
-
-local Body = Instance.new("Frame"); Body.BackgroundTransparency=1; Body.Position=UDim2.new(0,0,0,44); Body.Size=UDim2.new(1,0,1,-44); Body.Name="Body"; Body.Parent=Main
+local Body = Instance.new("Frame"); Body.Name="Body"; Body.BackgroundTransparency=1; Body.Position=UDim2.new(0,0,0,44); Body.Size=UDim2.new(1,0,1,-44); Body.Parent=Main
 local LeftPane = Instance.new("Frame"); LeftPane.BackgroundColor3=Theme.panel; LeftPane.Size=UDim2.new(0,360,1,0); LeftPane.Name="LeftPane"; LeftPane.Parent=Body; Instance.new("UIStroke",LeftPane).Color=Theme.stroke
 local Splitter = Instance.new("Frame"); Splitter.BackgroundColor3=Theme.stroke; Splitter.Size=UDim2.new(0,4,1,0); Splitter.Position=UDim2.new(0,360,0,0); Splitter.Name="Splitter"; Splitter.Parent=Body
 local RightPane = Instance.new("Frame"); RightPane.BackgroundColor3=Theme.panel; RightPane.Position=UDim2.new(0,364,0,0); RightPane.Size=UDim2.new(1,-364,1,0); RightPane.Name="RightPane"; RightPane.Parent=Body; Instance.new("UIStroke",RightPane).Color=Theme.stroke
 
-local TreeScroll = Instance.new("ScrollingFrame"); TreeScroll.BackgroundTransparency=1; TreeScroll.BorderSizePixel=0; TreeScroll.CanvasSize=UDim2.new(0,0,0,0)
-TreeScroll.ScrollingDirection=Enum.ScrollingDirection.Y; TreeScroll.ScrollBarThickness=6; TreeScroll.Size=UDim2.new(1,0,1,0); TreeScroll.Parent=LeftPane
+local TreeScroll = Instance.new("ScrollingFrame"); TreeScroll.BackgroundTransparency=1; TreeScroll.BorderSizePixel=0
+TreeScroll.CanvasSize=UDim2.new(0,0,0,0); TreeScroll.ScrollingDirection=Enum.ScrollingDirection.Y; TreeScroll.ScrollBarThickness=6; TreeScroll.Size=UDim2.new(1,0,1,0); TreeScroll.Parent=LeftPane
 local TreeLayout = Instance.new("UIListLayout"); TreeLayout.Padding=UDim.new(0,2); TreeLayout.SortOrder=Enum.SortOrder.LayoutOrder; TreeLayout.Parent=TreeScroll
+TreeLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    TreeScroll.CanvasSize = UDim2.new(0, 0, 0, TreeLayout.AbsoluteContentSize.Y + 16)
+end)
 
 local PropHeader = Instance.new("TextLabel"); PropHeader.BackgroundTransparency=1; PropHeader.Font=Enum.Font.GothamSemibold; PropHeader.TextSize=16; PropHeader.TextColor3=Theme.text
 PropHeader.TextXAlignment=Enum.TextXAlignment.Left; PropHeader.Text="Propriedades"; PropHeader.Size=UDim2.new(1,-16,0,28); PropHeader.Position=UDim2.new(0,12,0,8); PropHeader.Parent=RightPane
 
-local PropScroll = Instance.new("ScrollingFrame"); PropScroll.BackgroundTransparency=1; PropScroll.BorderSizePixel=0; PropScroll.CanvasSize=UDim2.new(0,0,0,0)
-PropScroll.ScrollingDirection=Enum.ScrollingDirection.Y; PropScroll.ScrollBarThickness=6; PropScroll.Size=UDim2.new(1,-24,1,-48); PropScroll.Position=UDim2.new(0,12,0,40); PropScroll.Parent=RightPane
+local PropScroll = Instance.new("ScrollingFrame"); PropScroll.BackgroundTransparency=1; PropScroll.BorderSizePixel=0
+PropScroll.CanvasSize=UDim2.new(0,0,0,0); PropScroll.ScrollingDirection=Enum.ScrollingDirection.Y; PropScroll.ScrollBarThickness=6; PropScroll.Size=UDim2.new(1,-24,1,-48); PropScroll.Position=UDim2.new(0,12,0,40); PropScroll.Parent=RightPane
 local PropLayout = Instance.new("UIListLayout"); PropLayout.Padding=UDim.new(0,4); PropLayout.SortOrder=Enum.SortOrder.LayoutOrder; PropLayout.Parent=PropScroll
+PropLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    PropScroll.CanvasSize = UDim2.new(0,0,0,PropLayout.AbsoluteContentSize.Y + 16)
+end)
 
 local StatusLabel = Instance.new("TextLabel"); StatusLabel.BackgroundTransparency=1; StatusLabel.Font=Enum.Font.Gotham; StatusLabel.TextSize=13; StatusLabel.TextColor3=Theme.subtext
 StatusLabel.TextXAlignment=Enum.TextXAlignment.Left; StatusLabel.Text=""; StatusLabel.Size=UDim2.new(1,-16,0,24); StatusLabel.Position=UDim2.new(0,12,1,-28); StatusLabel.Parent=RightPane
-
 local function setStatus(t) StatusLabel.Text=t or "" end
 local function clearChildren(gui) for _,c in ipairs(gui:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end end
 
--- ===== Property panel =====
+-- Property panel
 local function rowProperty(name, value, inst, allowEdit)
     local Row = Instance.new("Frame"); Row.BackgroundColor3=Theme.bg; Row.Size=UDim2.new(1,0,0,30)
     Instance.new("UICorner",Row).CornerRadius=UDim.new(0,6); Instance.new("UIStroke",Row).Color=Theme.stroke
@@ -210,7 +215,6 @@ local function buildPropertyPanel(inst, allowEdit)
         local ok,v=pcall(function() return inst[p] end)
         if ok then listed[p]=true; rowProperty(p,v,inst,allowEdit).Parent=PropScroll end
     end
-
     if getproperties_fn then
         local ok, list = pcall(function() return getproperties_fn(inst) end)
         if ok and type(list)=="table" then for _,p in ipairs(list) do addProp(p) end end
@@ -232,52 +236,64 @@ local function buildPropertyPanel(inst, allowEdit)
             Row.Parent=PropScroll
         end
     end
-
     PropLayout.Parent=PropScroll
-    PropScroll.CanvasSize=UDim2.new(0,0,0,PropLayout.AbsoluteContentSize.Y+16)
-    inst.Changed:Connect(function(p) if p=="Name" then PropHeader.Text=("Propriedades — %s (%s)"):format(inst.Name,inst.ClassName) end end)
-    inst.AncestryChanged:Connect(function() if not inst:IsDescendantOf(game) then setStatus("Instancia destruida"); clearChildren(PropScroll) end end)
 end
 
--- ===== Tree =====
+-- Tree com altura automática
 local Selected, SelectionBox
 
 local function makeTreeRow(inst, depth)
-    local Row=Instance.new("Frame"); Row.BackgroundColor3=Theme.bg; Row.Size=UDim2.new(1,-8,0,26); Row.LayoutOrder=depth
-    Instance.new("UICorner",Row).CornerRadius=UDim.new(0,6); Instance.new("UIStroke",Row).Color=Theme.stroke
+    -- Linha raiz com altura automática
+    local Row=Instance.new("Frame")
+    Row.BackgroundColor3=Theme.bg
+    Row.AutomaticSize = Enum.AutomaticSize.Y
+    Row.Size=UDim2.new(1,-8,0,0)
+    Row.LayoutOrder=depth
+    Instance.new("UICorner",Row).CornerRadius=UDim.new(0,6)
+    Instance.new("UIStroke",Row).Color=Theme.stroke
+
+    -- Layout vertical para Header + Children
+    local V = Instance.new("UIListLayout", Row)
+    V.FillDirection = Enum.FillDirection.Vertical
+    V.Padding = UDim.new(0,2)
+
+    -- Header fixo 26px
+    local Header = Instance.new("Frame")
+    Header.BackgroundTransparency = 1
+    Header.Size = UDim2.new(1,0,0,26)
+    Header.Parent = Row
 
     local Toggle=Instance.new("TextButton"); Toggle.BackgroundTransparency=1; Toggle.Text="▶"; Toggle.Font=Enum.Font.GothamSemibold; Toggle.TextSize=12; Toggle.TextColor3=Theme.subtext
-    Toggle.Size=UDim2.new(0,24,1,0); Toggle.Position=UDim2.new(0,6+depth*12,0,0); Toggle.Parent=Row
+    Toggle.Size=UDim2.new(0,24,1,0); Toggle.Position=UDim2.new(0,6+depth*12,0,0); Toggle.Parent=Header
 
     local NameBtn=Instance.new("TextButton"); NameBtn.BackgroundTransparency=1; NameBtn.TextXAlignment=Enum.TextXAlignment.Left; NameBtn.Font=Enum.Font.Gotham; NameBtn.TextSize=13; NameBtn.TextColor3=Theme.text
-    NameBtn.Text=("%s  [%s]"):format(inst.Name,inst.ClassName); NameBtn.Size=UDim2.new(1,-60-depth*12,1,0); NameBtn.Position=UDim2.new(0,30+depth*12,0,0); NameBtn.Parent=Row
+    NameBtn.Text=("%s  [%s]"):format(inst.Name,inst.ClassName); NameBtn.Size=UDim2.new(1,-60-depth*12,1,0); NameBtn.Position=UDim2.new(0,30+depth*12,0,0); NameBtn.Parent=Header
 
-    local ChildrenContainer=Instance.new("Frame"); ChildrenContainer.BackgroundTransparency=1; ChildrenContainer.Size=UDim2.new(1,0,0,0); ChildrenContainer.Parent=Row
-    local ChildLayout=Instance.new("UIListLayout"); ChildLayout.SortOrder=Enum.SortOrder.LayoutOrder; ChildLayout.Padding=UDim.new(0,2); ChildLayout.Parent=ChildrenContainer
+    -- Container dos filhos, auto height
+    local ChildrenContainer=Instance.new("Frame"); ChildrenContainer.BackgroundTransparency=1
+    ChildrenContainer.AutomaticSize = Enum.AutomaticSize.Y
+    ChildrenContainer.Size=UDim2.new(1,0,0,0)
+    ChildrenContainer.Parent=Row
+
+    local ChildLayout=Instance.new("UIListLayout", ChildrenContainer)
+    ChildLayout.SortOrder=Enum.SortOrder.LayoutOrder
+    ChildLayout.Padding=UDim.new(0,2)
 
     local expanded=false
     local function refreshChildren()
         clearChildren(ChildrenContainer)
         local kids={} pcall(function() kids=inst:GetChildren() end)
         table.sort(kids,function(a,b) return a.Name:lower()<b.Name:lower() end)
-        for _,child in ipairs(kids) do local sub=makeTreeRow(child, depth+1); sub.Parent=ChildrenContainer end
-        ChildrenContainer.Size=UDim2.new(1,0,0,ChildLayout.AbsoluteContentSize.Y)
-        ChildLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-            ChildrenContainer.Size=UDim2.new(1,0,0,ChildLayout.AbsoluteContentSize.Y)
-            Services.RunService.Heartbeat:Wait()
-            TreeScroll.CanvasSize=UDim2.new(0,0,0,TreeLayout.AbsoluteContentSize.Y+16)
-        end)
+        for _,child in ipairs(kids) do makeTreeRow(child, depth+1).Parent=ChildrenContainer end
     end
 
     Toggle.MouseButton1Click:Connect(function()
         expanded=not expanded; Toggle.Text=expanded and "▼" or "▶"
-        if expanded then refreshChildren() else clearChildren(ChildrenContainer); ChildrenContainer.Size=UDim2.new(1,0,0,0) end
-        Services.RunService.Heartbeat:Wait()
-        TreeScroll.CanvasSize=UDim2.new(0,0,0,TreeLayout.AbsoluteContentSize.Y+16)
+        if expanded then refreshChildren() else clearChildren(ChildrenContainer) end
     end)
 
     NameBtn.MouseButton1Click:Connect(function()
-        Selected=inst; buildPropertyPanel(inst, ToggleEditBtn.Text:find("LIGADA")~=nil); setStatus("Selecionado: "..getFullPath(inst))
+        Selected=inst; buildPropertyPanel(inst, false); setStatus("Selecionado: "..getFullPath(inst))
         if SelectionBox then SelectionBox:Destroy() end
         if inst:IsA("BasePart") then
             SelectionBox=Instance.new("SelectionBox"); SelectionBox.Name="MayunieDexSelection"; SelectionBox.LineThickness=0.03; SelectionBox.SurfaceTransparency=1; SelectionBox.Color3=Theme.accent
@@ -300,20 +316,22 @@ local ROOTS = {
 local function buildTree()
     clearChildren(TreeScroll)
     for _,root in ipairs(ROOTS) do makeTreeRow(root,0).Parent=TreeScroll end
-    TreeScroll.CanvasSize=UDim2.new(0,0,0,TreeLayout.AbsoluteContentSize.Y+16)
 end
 
--- ===== Busca =====
-local ResultsDrop=Instance.new("Frame"); ResultsDrop.BackgroundColor3=Theme.panel2; ResultsDrop.Visible=false; ResultsDrop.Size=UDim2.new(0,280,0,180); ResultsDrop.Position=UDim2.new(0,260,0,40); ResultsDrop.Parent=Main
+-- Busca
+local ResultsDrop=Instance.new("Frame"); ResultsDrop.BackgroundColor3=Theme.panel2; ResultsDrop.Visible=false; ResultsDrop.Size=UDim2.new(0,240,0,180); ResultsDrop.Parent=Main
 Instance.new("UICorner",ResultsDrop).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",ResultsDrop).Color=Theme.stroke
 local ResultsScroll=Instance.new("ScrollingFrame"); ResultsScroll.BackgroundTransparency=1; ResultsScroll.Size=UDim2.new(1,-8,1,-8); ResultsScroll.Position=UDim2.new(0,4,0,4); ResultsScroll.CanvasSize=UDim2.new(0,0,0,0); ResultsScroll.ScrollBarThickness=6; ResultsScroll.Parent=ResultsDrop
 local ResultsLayout=Instance.new("UIListLayout",ResultsScroll); ResultsLayout.Padding=UDim.new(0,4)
+ResultsLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    ResultsScroll.CanvasSize = UDim2.new(0,0,0,ResultsLayout.AbsoluteContentSize.Y + 8)
+end)
 
 local function addResultItem(inst)
     local Btn=Instance.new("TextButton"); Btn.BackgroundColor3=Theme.bg; Btn.Size=UDim2.new(1,0,0,28); Btn.TextXAlignment=Enum.TextXAlignment.Left; Btn.Font=Enum.Font.Gotham; Btn.TextSize=13; Btn.TextColor3=Theme.text
     Btn.Text=inst.Name.."  ["..inst.ClassName.."]"; Instance.new("UICorner",Btn).CornerRadius=UDim.new(0,6); Instance.new("UIStroke",Btn).Color=Theme.stroke; Btn.Parent=ResultsScroll
     Btn.MouseButton1Click:Connect(function()
-        Selected=inst; buildPropertyPanel(inst, ToggleEditBtn.Text:find("LIGADA")~=nil); setStatus("Selecionado: "..getFullPath(inst)); ResultsDrop.Visible=false
+        Selected=inst; buildPropertyPanel(inst, false); setStatus("Selecionado: "..getFullPath(inst)); ResultsDrop.Visible=false
         if SelectionBox then SelectionBox:Destroy() end
         if inst:IsA("BasePart") then SelectionBox=Instance.new("SelectionBox"); SelectionBox.LineThickness=0.03; SelectionBox.SurfaceTransparency=1; SelectionBox.Color3=Theme.accent; SelectionBox.Adornee=inst; SelectionBox.Parent=inst end
     end)
@@ -332,27 +350,106 @@ local function runSearch(q)
     end
     for _,root in ipairs(ROOTS) do pcall(scan,root); if #matches>=200 then break end end
     for _,inst in ipairs(matches) do addResultItem(inst) end
-    ResultsDrop.Visible=#matches>0; ResultsScroll.CanvasSize=UDim2.new(0,0,0,ResultsLayout.AbsoluteContentSize.Y+8)
+    -- Posiciona o dropdown abaixo da busca
+    local abs = SearchBox.AbsolutePosition
+    local size = SearchBox.AbsoluteSize
+    ResultsDrop.Position = UDim2.fromOffset(abs.X, abs.Y + size.Y + 4)
+    ResultsDrop.Size = UDim2.fromOffset(size.X, 180)
+    ResultsDrop.Visible = #matches>0
 end
 
 SearchBox:GetPropertyChangedSignal("Text"):Connect(function() runSearch(SearchBox.Text) end)
 
--- ===== Top buttons =====
-RefreshBtn.MouseButton1Click:Connect(function() buildTree(); setStatus("Arvore atualizada") end)
-CopyPathBtn.MouseButton1Click:Connect(function()
-    if not Selected then setStatus("Nada selecionado"); return end
-    local path=getFullPath(Selected)
-    if safeSetClipboard(path) then setStatus("Caminho copiado") else setStatus("Clipboard indisponivel. Path: "..path) end
-end)
-ToggleEditBtn.MouseButton1Click:Connect(function()
-    local enable=ToggleEditBtn.Text:find("DESLIGADA")~=nil
-    if enable then ToggleEditBtn.Text="Edicao: LIGADA"; ToggleEditBtn.TextColor3=Theme.ok; if Selected then buildPropertyPanel(Selected,true) end; setStatus("Edicao habilitada")
-    else ToggleEditBtn.Text="Edicao: DESLIGADA"; ToggleEditBtn.TextColor3=Theme.warn; if Selected then buildPropertyPanel(Selected,false) end; setStatus("Edicao desabilitada") end
+-- Menu ⋮
+local Menu = Instance.new("Frame")
+Menu.Visible = false
+Menu.Size = UDim2.fromOffset(180, 6)  -- altura ajusta depois
+Menu.BackgroundColor3 = Theme.panel2
+Menu.Parent = Main
+Instance.new("UICorner", Menu).CornerRadius = UDim.new(0,8)
+Instance.new("UIStroke", Menu).Color = Theme.stroke
+
+local MenuList = Instance.new("UIListLayout", Menu)
+MenuList.Padding = UDim.new(0,6)
+MenuList.FillDirection = Enum.FillDirection.Vertical
+MenuList.HorizontalAlignment = Enum.HorizontalAlignment.Stretch
+MenuList.VerticalAlignment = Enum.VerticalAlignment.Top
+
+local function menuButton(txt)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1,-12,0,28)
+    b.Position = UDim2.new(0,6,0,0)
+    b.BackgroundColor3 = Theme.bg
+    b.Text = txt
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 14
+    b.TextColor3 = Theme.text
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+    Instance.new("UIStroke", b).Color = Theme.stroke
+    b.Parent = Menu
+    return b
+end
+
+local BtnRefresh = menuButton("Atualizar árvore")
+local BtnCopyPath = menuButton("Copiar Path")
+local BtnToggleEdit = menuButton("Edição: OFF")
+local BtnCompact = menuButton("Compacto: OFF")
+local BtnMin = menuButton("Minimizar")
+
+local function updateMenuHeight()
+    Menu.Size = UDim2.fromOffset(180, MenuList.AbsoluteContentSize.Y + 12)
+end
+MenuList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateMenuHeight)
+updateMenuHeight()
+
+MoreBtn.MouseButton1Click:Connect(function()
+    Menu.Visible = not Menu.Visible
+    -- posiciona no canto direito da TopBar
+    local abs = MoreBtn.AbsolutePosition
+    Menu.Position = UDim2.fromOffset(abs.X - 180 + MoreBtn.AbsoluteSize.X, abs.Y + MoreBtn.AbsoluteSize.Y + 6)
 end)
 
--- ===== Arraste e Splitter =====
+BtnRefresh.MouseButton1Click:Connect(function() buildTree(); setStatus("Árvore atualizada"); Menu.Visible=false end)
+BtnCopyPath.MouseButton1Click:Connect(function()
+    if not Selected then setStatus("Nada selecionado"); Menu.Visible=false; return end
+    local path = getFullPath(Selected)
+    if safeSetClipboard(path) then setStatus("Caminho copiado") else setStatus("Clipboard indisponível. Path: "..path) end
+    Menu.Visible=false
+end)
+
+local editEnabled = false
+BtnToggleEdit.MouseButton1Click:Connect(function()
+    editEnabled = not editEnabled
+    BtnToggleEdit.Text = editEnabled and "Edição: ON" or "Edição: OFF"
+    if Selected then buildPropertyPanel(Selected, editEnabled) end
+    setStatus(editEnabled and "Edição habilitada" or "Edição desabilitada")
+    Menu.Visible=false
+end)
+
+local compact = false
+BtnCompact.MouseButton1Click:Connect(function()
+    compact = not compact
+    BtnCompact.Text = compact and "Compacto: ON" or "Compacto: OFF"
+    if compact then
+        LeftPane.Size=UDim2.new(1,0,1,0); RightPane.Visible=false; Splitter.Visible=false
+    else
+        LeftPane.Size=UDim2.new(0,360,1,0); RightPane.Visible=true; Splitter.Visible=true
+    end
+    Menu.Visible=false
+end)
+
+local minimized=false
+BtnMin.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    Body.Visible=not minimized; Splitter.Visible=not minimized
+    if minimized then Main.Size=UDim2.fromOffset(Main.AbsoluteSize.X,44) else Main.Size=UDim2.fromOffset(Main.AbsoluteSize.X,560) end
+    Menu.Visible=false
+end)
+
+-- Arraste, Splitter e Responsivo
 do
-    local dragging=false; local dragStart; local startPos; local UIS=Services.UserInputService
+    local UIS=Services.UserInputService
+    local dragging=false; local dragStart; local startPos
     TopBar.InputBegan:Connect(function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
             dragging=true; dragStart=input.Position; startPos=Main.Position
@@ -372,7 +469,8 @@ do
 end
 
 do
-    local resizing=false; local dragStart; local startX; local UIS=Services.UserInputService
+    local UIS=Services.UserInputService
+    local resizing=false; local dragStart; local startX
     Splitter.InputBegan:Connect(function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 then
             resizing=true; dragStart=input.Position; startX=LeftPane.Size.X.Offset
@@ -387,50 +485,30 @@ do
     end)
 end
 
--- ===== Responsivo p/ Emulador + Minimizar + Compacto =====
 local cam = workspace.CurrentCamera or workspace:WaitForChild("CurrentCamera")
-local scaler = Instance.new("UIScale"); scaler.Parent=Main
-local lastSize = Vector2.new(980,560)
+local scaler = Instance.new("UIScale", Main)
+local lastScale = 1
 local function fitWindow()
     local vp = cam and cam.ViewportSize or Vector2.new(1280,720)
     local pad=16; local base=Vector2.new(980,560)
     local scale = math.min((vp.X-pad*2)/base.X, (vp.Y-pad*2)/base.Y)
     scale = math.clamp(scale, 0.55, 1)
-    scaler.Scale = scale
-    local w = math.floor(base.X*scale); local h=math.floor(base.Y*scale)
-    Main.Size=UDim2.fromOffset(w,h); Main.Position=UDim2.fromOffset((vp.X-w)/2,(vp.Y-h)/2)
-    lastSize=Vector2.new(w,h)
+    scaler.Scale = scale; lastScale = scale
+    Main.Size=UDim2.fromOffset(math.floor(base.X*scale), math.floor(base.Y*scale))
+    Main.AnchorPoint=Vector2.new(0.5,0.5)
+    Main.Position=UDim2.fromOffset(math.floor(vp.X/2), math.floor(vp.Y/2))
 end
 fitWindow()
 cam:GetPropertyChangedSignal("ViewportSize"):Connect(fitWindow)
 
-local MinBtn=Instance.new("TextButton"); MinBtn.Name="MinBtn"; MinBtn.Parent=TopBar; MinBtn.Size=UDim2.new(0,28,0,28)
-MinBtn.Position=UDim2.new(1,-36,0,8); MinBtn.AnchorPoint=Vector2.new(1,0); MinBtn.BackgroundColor3=Theme.bg; MinBtn.Text="_"
-MinBtn.Font=Enum.Font.GothamSemibold; MinBtn.TextSize=16; MinBtn.TextColor3=Theme.text; Instance.new("UICorner",MinBtn).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",MinBtn).Color=Theme.stroke
-local minimized=false
-MinBtn.MouseButton1Click:Connect(function()
-    minimized=not minimized
-    Body.Visible=not minimized; Splitter.Visible=not minimized
-    if minimized then Main.Size=UDim2.fromOffset(lastSize.X,44) else fitWindow() end
-end)
-
-local CompactBtn=Instance.new("TextButton"); CompactBtn.Name="CompactBtn"; CompactBtn.Parent=TopBar; CompactBtn.Size=UDim2.new(0,96,0,28)
-CompactBtn.Position=UDim2.new(1,-170,0,8); CompactBtn.AnchorPoint=Vector2.new(1,0); CompactBtn.BackgroundColor3=Theme.bg; CompactBtn.Text="Compacto: Off"
-CompactBtn.Font=Enum.Font.GothamSemibold; CompactBtn.TextSize=14; CompactBtn.TextColor3=Theme.text; Instance.new("UICorner",CompactBtn).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",CompactBtn).Color=Theme.stroke
-local compact=false; local defaultLeft=360
-CompactBtn.MouseButton1Click:Connect(function()
-    compact=not compact; CompactBtn.Text=compact and "Compacto: On" or "Compacto: Off"
-    if compact then LeftPane.Size=UDim2.new(1,0,1,0); RightPane.Visible=false; Splitter.Visible=false else LeftPane.Size=UDim2.new(0,defaultLeft,1,0); RightPane.Visible=true; Splitter.Visible=true end
-    fitWindow()
-end)
-
--- ===== Hotkey de visibilidade =====
+-- Hotkey de visibilidade
 local visible=true
 Services.UserInputService.InputBegan:Connect(function(input,gp)
     if gp then return end
     if input.KeyCode==Enum.KeyCode.RightControl then visible=not visible; ScreenGui.Enabled=visible end
 end)
 
--- ===== Inicializa =====
+-- Inicializa
+local function buildPropertyPanelSafe(edit) if Selected then buildPropertyPanel(Selected, edit) end end
 buildTree(); setStatus("Pronto")
-task.defer(function() local ok=pcall(function() buildPropertyPanel(Services.Workspace,false) end); if ok then setStatus("Selecionado: Workspace") end end)
+task.defer(function() local ok=pcall(function() Selected=Services.Workspace; buildPropertyPanel(Selected,false) end); if ok then setStatus("Selecionado: Workspace") end end)
